@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <title>Ejercicio de Pinza – PC y Móvil</title>
+  <!-- MediaPipe Hands -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.min.js"></script>
+  <style>
+    :root {
+      --c1:#00796b; --c2:#00bfa5; --bg:#e0f7fa; --ink:#02312c; --accent:#ff7043;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue",Arial;sans-serif;background:var(--bg);color:var(--ink);}
+    header{padding:14px 16px;background:white;border-bottom:1px solid #cfe9e7;position:sticky;top:0;z-index:10}
+    h1{margin:0;font-size:18px;color:var(--c1)}
+    .wrap{padding:12px;max-width:960px;margin:0 auto}
+    .panel{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px}
+    .panel > *{font-size:14px}
+    select,button{appearance:none;border:1px solid #b7dfdc;background:white;border-radius:10px;padding:8px 10px}
+    button{cursor:pointer;color:white;background:var(--c1);border-color:var(--c1)}
+    button.secondary{background:white;color:var(--c1)}
+    button:disabled{opacity:.5;cursor:not-allowed}
+    .counter{font-weight:700;color:var(--c1)}
+    .stage{position:relative;display:inline-block;border:2px solid var(--c1);border-radius:12px;overflow:hidden;background:#fff}
+    canvas, video{display:block;max-width:100%;height:auto}
+    video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1)} /* espejo */
+    canvas{position:relative;z-index:2}
+    .notice{font-size:13px;color:#0f4c45;opacity:.9;margin-top:6px}
+  </style>
+</head>
+<body>
+  <header><h1>Ejercicio de Pinza – Atrapa las Pelotas (funciona en PC y celular)</h1></header>
+  <div class="wrap">
+    <div class="panel">
+      <label for="cameraSelect">Cámara:</label>
+      <select id="cameraSelect"></select>
+      <button id="btnFront" class="secondary" title="Selfie">Frontal</button>
+      <button id="btnBack" class="secondary" title="Trasera">Trasera</button>
+      <button id="btnStart">Iniciar cámara</button>
+      <button id="btnStop" disabled>Detener</button>
+      <span class="counter" id="contador">Pelotas atrapadas: 0</span>
+    </div>
+
+    <div class="stage" id="stage" style="width:min(100%,700px)">
+      <video id="video" playsinline muted></video>
+      <canvas id="canvas" width="640" height="480"></canvas>
+    </div>
+    <div class="notice">Sugerencias: usa HTTPS para que el navegador permita la cámara. En iPhone/iPad, abre en Safari. En Android/PC, Chrome funciona muy bien.</div>
+  </div>
+
+  <script>
+    // ---------- Elementos ----------
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const contadorDiv = document.getElementById('contador');
+    const cameraSelect = document.getElementById('cameraSelect');
+    const btnStart = document.getElementById('btnStart');
+    const btnStop = document.getElementById('btnStop');
+    const btnFront = document.getElementById('btnFront');
+    const btnBack = document.getElementById('btnBack');
+
+    // ---------- Estado ----------
+    let currentStream = null;
+    let rafId = null;
+    let atrapadas = 0;
+    let pinzaActiva = false;
+
+    // Pelotas alineadas (puedes cambiar colores/tamaño)
+    const pelotas = [
+      { x: 100, y: 240, r: 20, atrapada: false, color: '#ff5252' },
+      { x: 220, y: 240, r: 20, atrapada: false, color: '#ffb300' },
+      { x: 340, y: 240, r: 20, atrapada: false, color: '#42a5f5' },
+      { x: 460, y: 240, r: 20, atrapada: false, color: '#66bb6a' },
+      { x: 580, y: 240, r: 20, atrapada: false, color: '#ab47bc' }
+    ];
+
+    // ---------- Utilidades ----------
+    function calcularDistancia(p1, p2){
+      const dx = p1.x - p2.x; const dy = p1.y - p2.y; return Math.hypot(dx, dy);
+    }
+    function detectarColision(x, y, pelota){
+      const dx = x - pelota.x; const dy = y - pelota.y; return Math.hypot(dx, dy) < pelota.r;
+    }
+
+    // Mantener el canvas con el mismo aspect del video
+    function fitCanvasToVideo(){
+      if (!video.videoWidth || !video.videoHeight) return;
+      canvas.width = 640; canvas.height = 480;
+    }
+
+    // ---------- MediaPipe Hands ----------
+    const hands = new Hands({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}` });
+    hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.7, minTrackingConfidence: 0.7 });
+
+    hands.onResults((results) => {
+      ctx.save();
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      ctx.scale(-1, 1);
+      ctx.drawImage(results.image, -canvas.width, 0, canvas.width, canvas.height);
+      ctx.setTransform(1,0,0,1,0,0);
+
+      pelotas.forEach(p => {
+        if (!p.atrapada){
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.r, 0, Math.PI*2);
+          ctx.fillStyle = p.color; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = '#1b1b1b22'; ctx.stroke();
+        }
+      });
+
+      if (results.multiHandLandmarks && results.multiHandLandmarks.length){
+        const lm = results.multiHandLandmarks[0];
+        drawConnectors(ctx, lm, HAND_CONNECTIONS, { color: '#00FF88', lineWidth: 2 });
+        drawLandmarks(ctx, lm, { color: '#FF4081', lineWidth: 1 });
+
+        const pulgar = lm[4];
+        const indice = lm[8];
+        const distancia = calcularDistancia(pulgar, indice);
+        const xIndice = indice.x * canvas.width;
+        const yIndice = indice.y * canvas.height;
+
+        if (distancia < 0.05 && !pinzaActiva){
+          pelotas.forEach(p => {
+            if (!p.atrapada && detectarColision(xIndice, yIndice, p)){
+              p.atrapada = true; atrapadas++; contadorDiv.textContent = `Pelotas atrapadas: ${atrapadas}`;
+            }
+          });
+          pinzaActiva = true;
+        } else if (distancia >= 0.05){
+          pinzaActiva = false;
+        }
+      }
+      ctx.restore();
+    });
+
+    async function processLoop(){
+      if (!video.srcObject) return;
+      await hands.send({ image: video });
+      rafId = requestAnimationFrame(processLoop);
+    }
+
+    // ---------- Cámara ----------
+    async function listCameras(){
+      try{
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videos = devices.filter(d => d.kind === 'videoinput');
+        cameraSelect.innerHTML = '';
+        videos.forEach((d, i) => {
+          const opt = document.createElement('option');
+          opt.value = d.deviceId; opt.textContent = d.label || `Cámara ${i+1}`; cameraSelect.appendChild(opt);
+        });
+        if (!videos.length){
+          const opt = document.createElement('option');
+          opt.value = ''; opt.textContent = 'No hay cámaras'; cameraSelect.appendChild(opt);
+        }
+      }catch(e){ console.error('enumerateDevices', e); }
+    }
+
+    function stopStream(){
+      if (rafId) cancelAnimationFrame(rafId), rafId=null;
+      if (currentStream){ currentStream.getTracks().forEach(t => t.stop()); currentStream = null; }
+      video.srcObject = null; btnStop.disabled = true; btnStart.disabled = false;
+    }
+
+    async function startStream({ deviceId, facingMode } = {}){
+      try{
+        stopStream();
+        const constraints = { video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30 } } };
+        if (deviceId) constraints.video.deviceId = { exact: deviceId };
+        if (facingMode) constraints.video.facingMode = { ideal: facingMode };
+
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        currentStream = stream; video.srcObject = stream; await video.play();
+        fitCanvasToVideo();
+        btnStop.disabled = false; btnStart.disabled = true;
+        listCameras();
+        processLoop();
+      }catch(err){
+        console.error(err);
+        alert('No se pudo iniciar la cámara. Verifica permisos/HTTPS/navegador.');
+      }
+    }
+
+    // ---------- Eventos UI ----------
+    btnStart.addEventListener('click', () => {
+      const id = cameraSelect.value || undefined; startStream({ deviceId: id });
+    });
+    btnStop.addEventListener('click', stopStream);
+
+    btnFront.addEventListener('click', () => startStream({ facingMode:'user' }));
+    btnBack.addEventListener('click', () => startStream({ facingMode:'environment' }));
+
+    cameraSelect.addEventListener('change', () => {
+      const id = cameraSelect.value; if (id) startStream({ deviceId:id });
+    });
+
+    (async function init(){
+      if (!navigator.mediaDevices?.getUserMedia){
+        alert('Tu navegador no soporta getUserMedia. Prueba con Chrome, Edge, Safari o Firefox actualizados.');
+        return;
+      }
+      try{
+        const tmp = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        tmp.getTracks().forEach(t => t.stop());
+      }catch{}
+      await listCameras();
+    })();
+
+    window.addEventListener('beforeunload', stopStream);
+  </script>
+</body>
+</html>
